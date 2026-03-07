@@ -3,7 +3,7 @@
 # -----------------------------
 # Stage 1: Build Go binary
 # -----------------------------
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 # Install dependencies
 RUN apk add --no-cache git bash zip curl
