@@ -26,7 +26,7 @@ RUN go generate ./... && \
 # -----------------------------
 FROM alpine:latest
 
-RUN apk add --no-cache libc6-compat ca-certificates ffmpeg
+RUN apk add --no-cache libc6-compat ca-certificates ffmpeg curl
 
 WORKDIR /app
 
