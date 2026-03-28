@@ -85,8 +85,15 @@ const loadAttributesFromQuery = () => {
 window.addEventListener('load', () => {
   loadAttributesFromQuery();
 
+  // ?net=local  (default) → host-only ICE, no STUN/TURN → instant connect on localhost/LAN
+  // ?net=online             → all ICE (STUN+TURN)      → required for internet/TURN access
+  const params = new URLSearchParams(window.location.search);
+  const netMode = (params.get('net') || 'local').toLowerCase();
+  const iceTransportPolicy = netMode === 'online' ? 'all' : 'host';
+
   reader = new MediaMTXWebRTCReader({
     url: new URL('whep', window.location.href) + window.location.search,
+    iceTransportPolicy,
     onError: (err) => {
       setMessage(err);
     },
