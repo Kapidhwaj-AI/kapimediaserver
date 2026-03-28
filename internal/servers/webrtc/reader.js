@@ -423,15 +423,21 @@ class MediaMTXWebRTCReader {
     return {};
   }
 
-  #requestICEServers() {
-    return fetch(this.conf.url, {
-      method: 'OPTIONS',
-      headers: {
-        ...this.#authHeader(),
-      },
-    })
-      .then((res) => MediaMTXWebRTCReader.#linkToIceServers(res.headers.get('Link')));
+#requestICEServers() {
+  // Local/host mode: skip OPTIONS fetch entirely — no ICE servers needed,
+  // browser uses host candidates only (LAN/localhost). Saves a full RTT.
+  if (this.conf.iceTransportPolicy === 'host') {
+    return Promise.resolve([]);
   }
+
+  return fetch(this.conf.url, {
+    method: 'OPTIONS',
+    headers: {
+      ...this.#authHeader(),
+    },
+  })
+    .then((res) => MediaMTXWebRTCReader.#linkToIceServers(res.headers.get('Link')));
+}
 
   #setupPeerConnection(iceServers) {
     if (this.state !== 'running') {
