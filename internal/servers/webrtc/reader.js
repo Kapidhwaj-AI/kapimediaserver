@@ -438,14 +438,18 @@ class MediaMTXWebRTCReader {
       throw new Error('closed');
     }
 
-    const policy = this.conf.iceTransportPolicy || 'all';
+    const requestedPolicy = this.conf.iceTransportPolicy;
+    const isLocalMode = requestedPolicy === 'host';
+
+    // RTCIceTransportPolicy only accepts 'all' or 'relay' (W3C spec).
+    // For local/LAN mode we pass 'host' as a logical name from the HTML,
+    // but map it to 'all' here — the empty iceServers array already ensures
+    // only host (LAN/localhost) candidates are gathered; no STUN/TURN is contacted.
+    const iceTransportPolicy = isLocalMode ? 'all' : (requestedPolicy || 'all');
 
     this.pc = new RTCPeerConnection({
-      // When policy is 'host', clear ICE servers — no STUN/TURN contact at all.
-      // Browser only gathers host candidates (LAN IP / localhost) → connects instantly.
-      // When policy is 'all', use server-advertised ICE servers for STUN+TURN (internet mode).
-      iceServers: policy === 'host' ? [] : iceServers,
-      iceTransportPolicy: policy,
+      iceServers: isLocalMode ? [] : iceServers,
+      iceTransportPolicy,
       // https://webrtc.org/getting-started/unified-plan-transition-guide
       sdpSemantics: 'unified-plan',
     });
