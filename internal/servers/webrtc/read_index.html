@@ -49,7 +49,6 @@ html, body {
 const video = document.getElementById('video');
 const message = document.getElementById('message');
 let defaultControls = false;
-let reader = null;
 
 const setMessage = (str) => {
   if (str !== '') {
@@ -60,15 +59,82 @@ const setMessage = (str) => {
   message.innerText = str;
 };
 
+// ---------------------------------------------------------------------------
+// ICE config builder
+//
+// Usage via query param:
+//   ?net=local   → no STUN/TURN, host candidates only (LAN / kiosk use)
+//   ?net=remote  → use TURN server for external/internet access
+//   (default)    → local  (safe default for on-premise kiosk)
+//
+// Examples:
+//   http://device/cam1/  → local mode (default)
+//   http://device/cam1/?net=remote  → remote/TURN mode
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the Link header from a WHEP OPTIONS response.
+ * Returns an array of RTCIceServer objects, or [] if none.
+ */
+const linkToIceServers = (linkHeader) => {
+  if (!linkHeader) return [];
+  return linkHeader.split(',').map((link) => {
+    const parts = link.trim().split(';').map((p) => p.trim());
+    const url = parts[0].replace(/^<|>$/g, '');
+    const server = { urls: [url] };
+    parts.slice(1).forEach((attr) => {
+      const [k, v] = attr.split('=').map((s) => s.trim().replace(/^"|"$/g, ''));
+      if (k === 'username') server.username = v;
+      if (k === 'credential') server.credential = v;
+    });
+    return server;
+  });
+};
+
+/**
+ * Build RTCPeerConnection config based on ?net= query param.
+ *
+ * local  → iceServers: []   (host candidates only, fastest for LAN)
+ * remote → your TURN server (for clients outside the local network)
+ */
+const buildIceConfig = (linkHeader) => {
+  const params = new URLSearchParams(window.location.search);
+  const mode = (params.get('net') || 'local').toLowerCase();
+
+  if (mode === 'local') {
+    // Pure host candidates — zero STUN/TURN latency on LAN
+    return { iceServers: [] };
+  }
+
+  // remote mode: use WHEP-advertised ICE servers first, then fallback to TURN
+  const advertised = linkToIceServers(linkHeader);
+  if (advertised.length > 0) {
+    return { iceServers: advertised };
+  }
+
+  // Fallback TURN config — update credentials to match your server
+  return {
+    iceServers: [
+      {
+        urls: [
+          'turn:35.207.250.161:3478',
+          'turn:turn.kapidhwaj.ai:3478?transport=tcp',
+        ],
+        username: 'user123',
+        credential: 'user123',
+      },
+    ],
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Attribute loading
+// ---------------------------------------------------------------------------
+
 const parseBoolString = (str, defaultVal) => {
   str = (str || '');
-
-  if (['1', 'yes', 'true'].includes(str.toLowerCase())) {
-    return true;
-  }
-  if (['0', 'no', 'false'].includes(str.toLowerCase())) {
-    return false;
-  }
+  if (['1', 'yes', 'true'].includes(str.toLowerCase())) return true;
+  if (['0', 'no', 'false'].includes(str.toLowerCase())) return false;
   return defaultVal;
 };
 
@@ -78,35 +144,58 @@ const loadAttributesFromQuery = () => {
   video.muted = parseBoolString(params.get('muted'), true);
   video.autoplay = parseBoolString(params.get('autoplay'), true);
   video.playsInline = parseBoolString(params.get('playsinline'), true);
-  video.disablepictureinpicture = parseBoolString(params.get('disablepictureinpicture'), false);
   defaultControls = video.controls;
 };
+
+// ---------------------------------------------------------------------------
+// Bootstrap — runs after reader.js is loaded
+// ---------------------------------------------------------------------------
 
 window.addEventListener('load', () => {
   loadAttributesFromQuery();
 
-  reader = new MediaMTXWebRTCReader({
-    url: new URL('whep', window.location.href) + window.location.search,
-    onError: (err) => {
-      setMessage(err);
-    },
-    onTrack: (evt) => {
-      setMessage('');
-      video.srcObject = evt.streams[0];
-    },
-    onDataChannel: (evt) => {
-      evt.channel.binaryType = 'arraybuffer';
-      evt.channel.onmessage = (evt) => {
-        console.log('data channel message', evt.data);
-      };
-    },
-  });
-});
+  const whepUrl = new URL('whep', window.location.href) + window.location.search;
 
-window.addEventListener('beforeunload', () => {
-  if (reader !== null) {
-    reader.close();
-  }
+  // Fetch WHEP OPTIONS first so we can read Link: headers for ICE servers,
+  // then start the reader with the correct ICE config for local vs remote mode.
+  fetch(whepUrl, { method: 'OPTIONS' })
+    .then((res) => {
+      const linkHeader = res.headers.get('link');
+      const iceConfig = buildIceConfig(linkHeader);
+
+      new MediaMTXWebRTCReader({
+        url: whepUrl,
+
+        // Pass ICE servers to the reader — works with MediaMTX's reader.js API.
+        // If your version of reader.js uses a different key (e.g. `rtcConfiguration`
+        // or `peerConnectionConfig`), adjust accordingly.
+        iceServers: iceConfig.iceServers,
+
+        onError: (err) => {
+          setMessage(err);
+        },
+        onTrack: (evt) => {
+          setMessage('');
+          video.srcObject = evt.streams[0];
+        },
+      });
+    })
+    .catch(() => {
+      // OPTIONS failed (e.g. CORS in dev) — start with local mode as safe default
+      const iceConfig = buildIceConfig(null);
+
+      new MediaMTXWebRTCReader({
+        url: whepUrl,
+        iceServers: iceConfig.iceServers,
+        onError: (err) => {
+          setMessage(err);
+        },
+        onTrack: (evt) => {
+          setMessage('');
+          video.srcObject = evt.streams[0];
+        },
+      });
+    });
 });
 
 </script>

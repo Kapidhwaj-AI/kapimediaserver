@@ -11,20 +11,15 @@
  */
 
 /**
- * @callback OnDataChannel
- * @param {RTCDataChannelEvent} evt - data channel event.
- */
-
-/**
  * @typedef Conf
  * @type {object}
  * @property {string} url - absolute URL of the WHEP endpoint.
- * @property {string} user - username.
- * @property {string} pass - password.
- * @property {string} token - token.
  * @property {OnError} onError - called when there's an error.
  * @property {OnTrack} onTrack - called when there's a track available.
- * @property {OnDataChannel} onDataChannel - called when there's a data channel available.
+ * @property {RTCIceServer[]|null} [iceServers] - optional ICE server override.
+ *   When provided, these are used instead of the servers advertised by the
+ *   WHEP OPTIONS Link header.  Pass an empty array [] to disable all
+ *   STUN/TURN and use host-only candidates (fastest on LAN).
  */
 
 /** WebRTC/WHEP reader. */
@@ -412,23 +407,28 @@ class MediaMTXWebRTCReader {
       });
   }
 
-  #authHeader() {
-    if (this.conf.user !== undefined && this.conf.user !== '') {
-      const credentials = btoa(`${this.conf.user}:${this.conf.pass}`);
-      return {'Authorization': `Basic ${credentials}`};
-    }
-    if (this.conf.token !== undefined && this.conf.token !== '') {
-      return {'Authorization': `Bearer ${this.conf.token}`};
-    }
-    return {};
-  }
-
+  // ---------------------------------------------------------------------------
+  // PATCHED: #requestICEServers
+  //
+  // If conf.iceServers is provided (even as an empty array []), use it directly
+  // and skip the OPTIONS round-trip entirely.
+  //
+  // This lets the caller (read_index.html) decide local vs remote ICE policy
+  // via the ?net= query param without touching mediamtx server config.
+  //
+  //   conf.iceServers = []           → host-only, fastest for LAN
+  //   conf.iceServers = [{...TURN}]  → relay for remote/internet clients
+  //   conf.iceServers = undefined    → original behaviour (use WHEP Link header)
+  // ---------------------------------------------------------------------------
   #requestICEServers() {
+    // Caller provided an explicit ICE config — use it, skip OPTIONS fetch.
+    if (this.conf.iceServers !== undefined && this.conf.iceServers !== null) {
+      return Promise.resolve(this.conf.iceServers);
+    }
+
+    // Original behaviour: read ICE servers from WHEP OPTIONS Link header.
     return fetch(this.conf.url, {
       method: 'OPTIONS',
-      headers: {
-        ...this.#authHeader(),
-      },
     })
       .then((res) => MediaMTXWebRTCReader.#linkToIceServers(res.headers.get('Link')));
   }
@@ -448,13 +448,9 @@ class MediaMTXWebRTCReader {
     this.pc.addTransceiver('video', { direction });
     this.pc.addTransceiver('audio', { direction });
 
-    // using data channels requires creating a data channel locally
-    this.pc.createDataChannel('');
-
     this.pc.onicecandidate = (evt) => this.#onLocalCandidate(evt);
     this.pc.onconnectionstatechange = () => this.#onConnectionState();
     this.pc.ontrack = (evt) => this.#onTrack(evt);
-    this.pc.ondatachannel = (evt) => this.#onDataChannel(evt);
 
     return this.pc.createOffer()
       .then((offer) => {
@@ -473,10 +469,7 @@ class MediaMTXWebRTCReader {
 
     return fetch(this.conf.url, {
       method: 'POST',
-      headers: {
-        ...this.#authHeader(),
-        'Content-Type': 'application/sdp',
-      },
+      headers: {'Content-Type': 'application/sdp'},
       body: offer,
     })
       .then((res) => {
@@ -561,10 +554,6 @@ class MediaMTXWebRTCReader {
       return;
     }
 
-    // "closed" can arrive before "failed" and without
-    // the close() method being called at all.
-    // It happens when the other peer sends a termination
-    // message like a DTLS CloseNotify.
     if (this.pc.connectionState === 'failed'
       || this.pc.connectionState === 'closed'
     ) {
@@ -575,12 +564,6 @@ class MediaMTXWebRTCReader {
   #onTrack(evt) {
     if (this.conf.onTrack !== undefined) {
       this.conf.onTrack(evt);
-    }
-  }
-
-  #onDataChannel(evt) {
-    if (this.conf.onDataChannel !== undefined) {
-      this.conf.onDataChannel(evt);
     }
   }
 }
