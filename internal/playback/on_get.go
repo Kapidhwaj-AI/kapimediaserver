@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
@@ -17,6 +18,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/recordstore"
 	"github.com/gin-gonic/gin"
 )
+
 
 type writerWrapper struct {
 	ctx     *gin.Context
@@ -30,6 +32,16 @@ func (w *writerWrapper) Write(p []byte) (int, error) {
 		w.ctx.Header("Content-Type", "video/mp4")
 	}
 	return w.ctx.Writer.Write(p)
+}
+
+// logWriter forwards ffmpeg's stderr lines into the mediamtx structured log.
+type logWriter struct {
+	s *Server
+}
+
+func (lw *logWriter) Write(p []byte) (int, error) {
+	lw.s.Log(logger.Warn, "ffmpeg: %s", strings.TrimRight(string(p), "\r\n"))
+	return len(p), nil
 }
 
 func parseDuration(raw string) (time.Duration, error) {
@@ -195,11 +207,15 @@ func (s *Server) onGet(ctx *gin.Context) {
 		// stdin  → fMP4 stream from the muxer
 		// stdout → H.264 MP4 streamed directly to the client
 		//
-		// Fully-hardware pipeline (Rockchip RK3588):
-		//   hevc_rkmpp decoder → h264_rkmpp encoder (VPU, no CPU pixel work)
-		//   h264_rkmpp accepts the decoder's frame format natively; vpp_rkrga is not needed.
-		//   Audio is stream-copied (already AAC in recorded fMP4) — zero CPU.
-		cmd := exec.CommandContext(ctx.Request.Context(), "ffmpeg",
+		// Hardware path (Rockchip RK3588):
+		//   The container's own ffmpeg is typically a stock build without rkmpp.
+		//   The host ffmpeg (/usr/bin/ffmpeg, compiled with --enable-rkmpp) is reached
+		//   via /usr/local/bin/mtx-host.sh — a host-namespace wrapper that is bind-mounted
+		//   from the host into the container at /usr/local/bin.
+		//   If mtx-host.sh is not found we fall back to the container's ffmpeg (software).
+		const hostWrapper = "/usr/local/bin/mtx-host.sh"
+		const hostFFmpeg = "/usr/bin/ffmpeg"
+		ffmpegArgs := []string{
 			"-hide_banner", "-loglevel", "warning", // suppress banner; log only warnings+
 			"-c:v", "hevc_rkmpp", // hardware H.265 decoder (must precede -i)
 			"-i", "pipe:0", // read fMP4 from stdin
@@ -208,17 +224,44 @@ func (s *Server) onGet(ctx *gin.Context) {
 			"-c:v", "h264_rkmpp", // hardware H.264 encoder
 			"-b:v", "2500k", "-maxrate", "2500k", "-bufsize", "5000k", // CBR for smooth HTTP streaming
 			"-g", "50", // keyframe every 50 frames (~2 s at 25 fps) — aids seeking
-			"-c:a", "copy", // stream-copy audio (already AAC, zero CPU)
+			"-c:a", "copy", // stream-copy audio (already AAC in recorded fMP4, zero CPU)
 			"-movflags", "frag_keyframe+empty_moov", // fragmented MP4 required for pipe/HTTP output
 			"-f", "mp4",
 			"pipe:1", // write to stdout → client
-		)
+		}
+
+		var cmd *exec.Cmd
+		if _, statErr := os.Stat(hostWrapper); statErr == nil {
+			// Host-namespace wrapper found: use host's rkmpp-enabled ffmpeg.
+			s.Log(logger.Info, "transcode: using hardware path via %s", hostWrapper)
+			cmd = exec.CommandContext(ctx.Request.Context(), hostWrapper,
+				append([]string{hostFFmpeg}, ffmpegArgs...)...)
+		} else {
+			// Fallback: container's own ffmpeg (software codecs only).
+			s.Log(logger.Info, "transcode: %s not found, falling back to software ffmpeg", hostWrapper)
+			ffmpegArgs[5] = "hevc" // replace hevc_rkmpp decoder with software hevc
+			// replace h264_rkmpp encoder with libx264
+			for i, a := range ffmpegArgs {
+				if a == "h264_rkmpp" {
+					ffmpegArgs[i] = "libx264"
+					// insert -preset veryfast -crf 23 after libx264
+					tail := append([]string{"-preset", "veryfast", "-crf", "23"}, ffmpegArgs[i+1:]...)
+					ffmpegArgs = append(ffmpegArgs[:i+1], tail...)
+					break
+				}
+			}
+			cmd = exec.CommandContext(ctx.Request.Context(), "ffmpeg", ffmpegArgs...)
+		}
+
 		cmd.Stdin = pipeR
 		cmd.Stdout = ctx.Writer
+		// Route ffmpeg stderr to the mediamtx log so errors are visible.
+		cmd.Stderr = &logWriter{s: s}
 
 		// Set response headers before the first byte is written.
 		ctx.Header("Accept-Ranges", "none")
 		ctx.Header("Content-Type", "video/mp4")
+
 
 		if startErr := cmd.Start(); startErr != nil {
 			pipeR.CloseWithError(startErr)
