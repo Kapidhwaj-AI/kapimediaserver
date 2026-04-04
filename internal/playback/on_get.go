@@ -193,16 +193,22 @@ func (s *Server) onGet(ctx *gin.Context) {
 
 		// Build the ffmpeg command.
 		// stdin  → fMP4 stream from the muxer
-		// stdout → transcoded H.264 MP4 streamed directly to the client
+		// stdout → H.264 MP4 streamed directly to the client
+		//
+		// Hardware pipeline (Rockchip RK3588 / rkmpp + rkrga):
+		//   hevc_rkmpp  – VPU hardware H.265 decoder (output: DRM frames)
+		//   vpp_rkrga   – RGA pixel-format conversion (→ nv12, zero-copy)
+		//   h264_rkmpp  – VPU hardware H.264 encoder
+		// CPU is used only for demux/mux; no pixel data ever touches a CPU core.
 		cmd := exec.CommandContext(ctx.Request.Context(), "ffmpeg",
-			"-i", "pipe:0", // read from stdin
-			"-c:v", "libx264",
-			"-preset", "veryfast",
-			"-crf", "23",
-			"-c:a", "aac",
-			"-movflags", "frag_keyframe+empty_moov",
+			"-c:v", "hevc_rkmpp", // hardware H.265 decoder (must precede -i)
+			"-i", "pipe:0", // read fMP4 from stdin
+			"-vf", "vpp_rkrga=format=nv12", // RGA: keep frames in HW memory, set encoder-compatible fmt
+			"-c:v", "h264_rkmpp", // hardware H.264 encoder
+			"-c:a", "aac", // audio: CPU-side AAC (lightweight)
+			"-movflags", "frag_keyframe+empty_moov", // fragmented MP4 for streaming
 			"-f", "mp4",
-			"pipe:1", // write to stdout
+			"pipe:1", // write to stdout → client
 		)
 		cmd.Stdin = pipeR
 		cmd.Stdout = ctx.Writer
