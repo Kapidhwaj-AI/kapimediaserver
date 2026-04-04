@@ -462,7 +462,16 @@ class MediaMTXWebRTCReader {
 
     const direction = 'recvonly';
     this.pc.addTransceiver('video', { direction });
-    this.pc.addTransceiver('audio', { direction });
+
+    // Handle Two-Way Audio if a microphone track was provided
+    if (this.conf.micTrack && this.conf.micStream) {
+      this.pc.addTransceiver(this.conf.micTrack, { 
+        direction: 'sendrecv', 
+        streams: [this.conf.micStream] 
+      });
+    } else {
+      this.pc.addTransceiver('audio', { direction });
+    }
 
     // using data channels requires creating a data channel locally
     this.pc.createDataChannel('');

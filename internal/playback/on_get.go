@@ -3,9 +3,11 @@ package playback
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"time"
 
@@ -170,6 +172,85 @@ func (s *Server) onGet(ctx *gin.Context) {
 		}
 		return
 	}
+
+
+	// ?transcode=h264: pipe fMP4 through ffmpeg → H.264 MP4 on the fly
+	if ctx.Query("transcode") == "h264" {
+		// Create a pipe: the muxer writes fMP4 to pipeW; ffmpeg reads from pipeR.
+		pipeR, pipeW := io.Pipe()
+
+		// Point the muxer at the write end of the pipe.
+		// We use a plain writerWrapper that targets the pipe instead of the
+		// ResponseWriter so that headers are set separately below.
+		pipeWW := &writerWrapper{ctx: ctx}
+		pipeWW.written = true // suppress writerWrapper's header injection; we set them manually
+		switch format {
+		case "", "fmp4":
+			m = &muxerFMP4{w: pipeW}
+		case "mp4":
+			m = &muxerMP4{w: pipeW}
+		}
+
+		// Build the ffmpeg command.
+		// stdin  → fMP4 stream from the muxer
+		// stdout → transcoded H.264 MP4 streamed directly to the client
+		cmd := exec.CommandContext(ctx.Request.Context(), "ffmpeg",
+			"-i", "pipe:0", // read from stdin
+			"-c:v", "libx264",
+			"-preset", "veryfast",
+			"-crf", "23",
+			"-c:a", "aac",
+			"-movflags", "frag_keyframe+empty_moov",
+			"-f", "mp4",
+			"pipe:1", // write to stdout
+		)
+		cmd.Stdin = pipeR
+		cmd.Stdout = ctx.Writer
+
+		// Set response headers before the first byte is written.
+		ctx.Header("Accept-Ranges", "none")
+		ctx.Header("Content-Type", "video/mp4")
+
+		if startErr := cmd.Start(); startErr != nil {
+			pipeR.CloseWithError(startErr)
+			pipeW.CloseWithError(startErr)
+			s.writeError(ctx, http.StatusInternalServerError,
+				fmt.Errorf("ffmpeg start failed: %w", startErr))
+			return
+		}
+
+		// Run seekAndMux in a goroutine so we can Wait() on ffmpeg in this goroutine.
+		muxErr := make(chan error, 1)
+		go func() {
+			err := seekAndMux(pathConf.RecordFormat, segments, start, duration, m)
+			// Always close the write end so ffmpeg sees EOF.
+			pipeW.CloseWithError(err)
+			muxErr <- err
+		}()
+
+		// Wait for ffmpeg to finish (it will exit when its stdin is closed).
+		ffmpegErr := cmd.Wait()
+
+		// Drain the mux result so the goroutine doesn't leak.
+		muxResult := <-muxErr
+
+		// If the client disconnected, both errors are expected — ignore them.
+		var neterr *net.OpError
+		if errors.As(muxResult, &neterr) {
+			return
+		}
+
+		if ffmpegErr != nil {
+			s.Log(logger.Error, "ffmpeg exited with error: %v", ffmpegErr)
+		}
+		if muxResult != nil {
+			s.Log(logger.Error, "muxer error during transcode: %v", muxResult)
+		}
+		return
+	}
+	// ---------------------------------------------------------------------------
+	// Default path: write fMP4/MP4 directly to the ResponseWriter (unchanged)
+	// ---------------------------------------------------------------------------
 
 	err = seekAndMux(pathConf.RecordFormat, segments, start, duration, m)
 	if err != nil {
