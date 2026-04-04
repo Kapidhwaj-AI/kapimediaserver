@@ -195,18 +195,21 @@ func (s *Server) onGet(ctx *gin.Context) {
 		// stdin  → fMP4 stream from the muxer
 		// stdout → H.264 MP4 streamed directly to the client
 		//
-		// Hardware pipeline (Rockchip RK3588 / rkmpp + rkrga):
-		//   hevc_rkmpp  – VPU hardware H.265 decoder (output: DRM frames)
-		//   vpp_rkrga   – RGA pixel-format conversion (→ nv12, zero-copy)
-		//   h264_rkmpp  – VPU hardware H.264 encoder
-		// CPU is used only for demux/mux; no pixel data ever touches a CPU core.
+		// Fully-hardware pipeline (Rockchip RK3588):
+		//   hevc_rkmpp decoder → h264_rkmpp encoder (VPU, no CPU pixel work)
+		//   h264_rkmpp accepts the decoder's frame format natively; vpp_rkrga is not needed.
+		//   Audio is stream-copied (already AAC in recorded fMP4) — zero CPU.
 		cmd := exec.CommandContext(ctx.Request.Context(), "ffmpeg",
+			"-hide_banner", "-loglevel", "warning", // suppress banner; log only warnings+
 			"-c:v", "hevc_rkmpp", // hardware H.265 decoder (must precede -i)
 			"-i", "pipe:0", // read fMP4 from stdin
-			"-vf", "vpp_rkrga=format=nv12", // RGA: keep frames in HW memory, set encoder-compatible fmt
+			"-map", "0:v:0", // select first video stream
+			"-map", "0:a:0?", // select first audio stream (? = optional, handles video-only)
 			"-c:v", "h264_rkmpp", // hardware H.264 encoder
-			"-c:a", "aac", // audio: CPU-side AAC (lightweight)
-			"-movflags", "frag_keyframe+empty_moov", // fragmented MP4 for streaming
+			"-b:v", "2500k", "-maxrate", "2500k", "-bufsize", "5000k", // CBR for smooth HTTP streaming
+			"-g", "50", // keyframe every 50 frames (~2 s at 25 fps) — aids seeking
+			"-c:a", "copy", // stream-copy audio (already AAC, zero CPU)
+			"-movflags", "frag_keyframe+empty_moov", // fragmented MP4 required for pipe/HTTP output
 			"-f", "mp4",
 			"pipe:1", // write to stdout → client
 		)
