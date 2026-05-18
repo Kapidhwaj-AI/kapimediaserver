@@ -423,30 +423,55 @@ class MediaMTXWebRTCReader {
     return {};
   }
 
-  #requestICEServers() {
-    return fetch(this.conf.url, {
-      method: 'OPTIONS',
-      headers: {
-        ...this.#authHeader(),
-      },
-    })
-      .then((res) => MediaMTXWebRTCReader.#linkToIceServers(res.headers.get('Link')));
+#requestICEServers() {
+  // Local/host mode: skip OPTIONS fetch entirely — no ICE servers needed,
+  // browser uses host candidates only (LAN/localhost). Saves a full RTT.
+  if (this.conf.iceTransportPolicy === 'host') {
+    return Promise.resolve([]);
   }
+
+  return fetch(this.conf.url, {
+    method: 'OPTIONS',
+    headers: {
+      ...this.#authHeader(),
+    },
+  })
+    .then((res) => MediaMTXWebRTCReader.#linkToIceServers(res.headers.get('Link')));
+}
 
   #setupPeerConnection(iceServers) {
     if (this.state !== 'running') {
       throw new Error('closed');
     }
 
+    const requestedPolicy = this.conf.iceTransportPolicy;
+    const isLocalMode = requestedPolicy === 'host';
+
+    // RTCIceTransportPolicy only accepts 'all' or 'relay' (W3C spec).
+    // For local/LAN mode we pass 'host' as a logical name from the HTML,
+    // but map it to 'all' here — the empty iceServers array already ensures
+    // only host (LAN/localhost) candidates are gathered; no STUN/TURN is contacted.
+    const iceTransportPolicy = isLocalMode ? 'all' : (requestedPolicy || 'all');
+
     this.pc = new RTCPeerConnection({
-      iceServers,
+      iceServers: isLocalMode ? [] : iceServers,
+      iceTransportPolicy,
       // https://webrtc.org/getting-started/unified-plan-transition-guide
       sdpSemantics: 'unified-plan',
     });
 
     const direction = 'recvonly';
     this.pc.addTransceiver('video', { direction });
-    this.pc.addTransceiver('audio', { direction });
+
+    // Handle Two-Way Audio if a microphone track was provided
+    if (this.conf.micTrack && this.conf.micStream) {
+      this.pc.addTransceiver(this.conf.micTrack, { 
+        direction: 'sendrecv', 
+        streams: [this.conf.micStream] 
+      });
+    } else {
+      this.pc.addTransceiver('audio', { direction });
+    }
 
     // using data channels requires creating a data channel locally
     this.pc.createDataChannel('');
