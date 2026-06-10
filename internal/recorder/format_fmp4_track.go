@@ -92,24 +92,7 @@ func (t *formatFMP4Track) write(sample *formatFMP4Sample) error {
 		t.startInitialized = true
 	}
 
-	// Index keyframes
-	if (!t.f.hasVideo || t.initTrack.Codec.IsVideo()) && !sample.IsNonSyncSample {
-		segmentName := ""
-		if t.f.currentSegment != nil {
-			segmentName = t.f.currentSegment.path // use segment.path instead of pathName
-		}
-		
-		err := t.f.ri.keyframeIndex.Append(KeyframeIndexEntry{
-			WallTime:   sample.ntp,
-			Segment:    segmentName,
-			MonoPTS:    int64(ptsNs),
-			IsGapStart: isGap,
-		})
-		if err != nil {
-			t.f.ri.Log(logger.Warn, "failed to write keyframe index: %v", err)
-		}
-	}
-
+	// Create segment if needed (before indexing, so segment path is known)
 	if t.f.currentSegment == nil {
 		t.f.currentSegment = &formatFMP4Segment{
 			f:        t.f,
@@ -122,6 +105,19 @@ func (t *formatFMP4Track) write(sample *formatFMP4Sample) error {
 	} else if (dts - t.f.currentSegment.startDTS) < 0 { // BaseTime is negative, this is not supported by fMP4
 		t.f.ri.Log(logger.Warn, "sample of track %d received too late, discarding", t.initTrack.ID)
 		return nil
+	}
+
+	// Index keyframes (now segment path is guaranteed to be set)
+	if (!t.f.hasVideo || t.initTrack.Codec.IsVideo()) && !sample.IsNonSyncSample {
+		err := t.f.ri.keyframeIndex.Append(KeyframeIndexEntry{
+			WallTime:   sample.ntp,
+			Segment:    t.f.currentSegment.path,
+			MonoPTS:    int64(ptsNs),
+			IsGapStart: isGap,
+		})
+		if err != nil {
+			t.f.ri.Log(logger.Warn, "failed to write keyframe index: %v", err)
+		}
 	}
 
 	err := t.f.currentSegment.write(t, sample, dts)

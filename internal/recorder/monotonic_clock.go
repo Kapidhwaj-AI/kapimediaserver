@@ -32,7 +32,8 @@ func (mc *MonotonicClock) Initialize(gapThreshold time.Duration) {
 }
 
 // Stamp returns the monotonic PTS for the current frame.
-// wallNow should be time.Now() called by the caller.
+// wallNow should be the frame's wall clock time.
+// Multiple tracks may call this concurrently with out-of-order timestamps.
 // Returns (pts, isGap). If isGap is true, a gap was detected and OnGap was called.
 func (mc *MonotonicClock) Stamp(wallNow time.Time) (pts time.Duration, isGap bool) {
 	mc.mu.Lock()
@@ -48,22 +49,24 @@ func (mc *MonotonicClock) Stamp(wallNow time.Time) (pts time.Duration, isGap boo
 
 	elapsed := wallNow.Sub(mc.lastMono)
 
+	// If this frame is from the past (multi-track concurrency), ignore the backward jump
+	// but still emit a monotonic timestamp based on the frame's actual position
+	if elapsed < 0 {
+		// Frame arrived out-of-order: use zero elapsed, don't update lastMono
+		elapsed = 0
+		return mc.lastEmitted, false
+	}
+
+	// Detect gaps (silence > threshold)
 	if elapsed > mc.gapThreshold {
 		isGap = true
 		if mc.OnGap != nil {
 			mc.OnGap(mc.lastMono, wallNow, mc.lastEmitted)
 		}
-		// Advance monotonic clock by the exact gap
-		mc.lastEmitted += elapsed
-		mc.lastMono = wallNow
-		return mc.lastEmitted, true
 	}
 
-	if elapsed < 0 {
-		elapsed = 0
-	}
-
+	// Always advance the monotonic clock by actual elapsed time
 	mc.lastEmitted += elapsed
 	mc.lastMono = wallNow
-	return mc.lastEmitted, false
+	return mc.lastEmitted, isGap
 }

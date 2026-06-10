@@ -46,21 +46,18 @@ func (t *formatMPEGTSTrack) write(
 	}
 
 	// MPEG-TS keyframe indexing disabled: playback doesn't support MPEG-TS format yet.
-	// Once MPEG-TS playback is implemented, re-enable indexing here.
+	// Once MPEG-TS playback is implemented, re-enable indexing AFTER the switch block below
+	// (to ensure currentSegment.path is set). Example:
 	// if (!t.f.hasVideo || isVideo) && randomAccess {
-	// 	segmentName := ""
-	// 	if t.f.currentSegment != nil {
-	// 		segmentName = t.f.currentSegment.path
-	// 	}
-	// 	err := t.f.ri.keyframeIndex.Append(KeyframeIndexEntry{
-	// 		WallTime:   ntp,
-	// 		Segment:    segmentName,
-	// 		MonoPTS:    int64(ptsNs),
-	// 		IsGapStart: isGap,
-	// 	})
-	// 	if err != nil {
-	// 		t.f.ri.Log(logger.Warn, "failed to write keyframe index: %v", err)
-	// 	}
+	//     err := t.f.ri.keyframeIndex.Append(KeyframeIndexEntry{
+	//         WallTime:   ntp,
+	//         Segment:    t.f.currentSegment.path,  // Path guaranteed to exist
+	//         MonoPTS:    int64(ptsNs),
+	//         IsGapStart: isGap,
+	//     })
+	//     if err != nil {
+	//         t.f.ri.Log(logger.Warn, "failed to write keyframe index: %v", err)
+	//     }
 	// }
 
 	switch {

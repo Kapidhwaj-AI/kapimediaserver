@@ -5,10 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 type KeyframeIndexEntry struct {
@@ -24,17 +23,20 @@ type KeyframeIndex struct {
 	f    *os.File
 }
 
-func (k *KeyframeIndex) Initialize(segmentFormatPath string, streamID uuid.UUID) error {
-	dir := filepath.Dir(segmentFormatPath)
-	err := os.MkdirAll(dir, 0o755)
+func (k *KeyframeIndex) Initialize(recordingDir string, streamName string) error {
+	err := os.MkdirAll(recordingDir, 0o755)
 	if err != nil {
 		return err
 	}
 
-	// Use streamID to isolate index per recording session.
+	// Sanitize stream name for use in filename (replace path separators with underscores)
+	sanitized := strings.ReplaceAll(streamName, "/", "_")
+	sanitized = strings.ReplaceAll(sanitized, "\\", "_")
+
+	// Use stream name for readable index filename.
 	// Important: Index stores absolute segment file paths. Moving or deleting segment files
 	// will break seeking. Keep segments in their original directory.
-	k.path = filepath.Join(dir, fmt.Sprintf("index-%s.jsonl", streamID))
+	k.path = filepath.Join(recordingDir, fmt.Sprintf("index-%s.jsonl", sanitized))
 	f, err := os.OpenFile(k.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err

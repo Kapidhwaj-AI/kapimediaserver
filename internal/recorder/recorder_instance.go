@@ -1,6 +1,7 @@
 package recorder
 
 import (
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -57,7 +58,10 @@ func (ri *recorderInstance) initialize() {
 	ri.terminate = make(chan struct{})
 	ri.done = make(chan struct{})
 
-	ri.keyframeIndex.Initialize(ri.pathFormat, ri.streamID)
+	// Initialize keyframe index in the stream's recording directory (pathFormat2 has %path replaced)
+	// Use stream name (pathName) instead of UUID for readable index filenames
+	indexDir := filepath.Dir(ri.pathFormat2)
+	ri.keyframeIndex.Initialize(indexDir, ri.pathName)
 	ri.monoClock.Initialize(2 * time.Second)
 	ri.monoClock.OnGap = func(wallStart, wallEnd time.Time, monoPTS time.Duration) {
 		ri.Log(logger.Info, "gap detected: %s to %s (duration: %s)", wallStart, wallEnd, wallEnd.Sub(wallStart))
