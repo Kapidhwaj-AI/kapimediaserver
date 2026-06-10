@@ -1,7 +1,6 @@
 package recorder
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
@@ -83,16 +82,31 @@ func (t *formatFMP4Track) write(sample *formatFMP4Sample) error {
 
 	sample.Duration = uint32(duration)
 
-	dts := timestampToDuration(sample.dts, int(t.initTrack.TimeScale))
+	// Get monotonic PTS in nanoseconds based on the frame ingest time
+	ptsNs, isGap := t.f.ri.monoClock.Stamp(sample.ntp)
+	dts := ptsNs
 
 	if !t.startInitialized {
 		t.startDTS = dts
 		t.startNTP = sample.ntp
 		t.startInitialized = true
-	} else {
-		drift := sample.ntp.Sub(t.startNTP) - (dts - t.startDTS)
-		if drift < -ntpDriftTolerance || drift > ntpDriftTolerance {
-			return fmt.Errorf("detected drift between recording duration and absolute time, resetting")
+	}
+
+	// Index keyframes
+	if (!t.f.hasVideo || t.initTrack.Codec.IsVideo()) && !sample.IsNonSyncSample {
+		segmentName := ""
+		if t.f.currentSegment != nil {
+			segmentName = t.f.currentSegment.path // use segment.path instead of pathName
+		}
+		
+		err := t.f.ri.keyframeIndex.Append(KeyframeIndexEntry{
+			WallTime:   sample.ntp,
+			Segment:    segmentName,
+			MonoPTS:    int64(ptsNs),
+			IsGapStart: isGap,
+		})
+		if err != nil {
+			t.f.ri.Log(logger.Warn, "failed to write keyframe index: %v", err)
 		}
 	}
 

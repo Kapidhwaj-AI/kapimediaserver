@@ -32,6 +32,9 @@ type recorderInstance struct {
 
 	terminate chan struct{}
 	done      chan struct{}
+
+	monoClock     MonotonicClock
+	keyframeIndex KeyframeIndex
 }
 
 // Log implements logger.Writer.
@@ -53,6 +56,13 @@ func (ri *recorderInstance) initialize() {
 
 	ri.terminate = make(chan struct{})
 	ri.done = make(chan struct{})
+
+	ri.keyframeIndex.Initialize(ri.pathFormat)
+	ri.monoClock.Initialize(2 * time.Second)
+	ri.monoClock.OnGap = func(wallStart, wallEnd time.Time, monoPTS time.Duration) {
+		ri.Log(logger.Info, "gap detected: %s to %s (duration: %s)", wallStart, wallEnd, wallEnd.Sub(wallStart))
+		// We flag gap starts inside the keyframe index instead of a separate sidecar.
+	}
 
 	switch ri.format {
 	case conf.RecordFormatMPEGTS:
@@ -98,5 +108,6 @@ func (ri *recorderInstance) run() {
 		<-ri.terminate
 	}
 
+	ri.keyframeIndex.Close()
 	ri.format2.close()
 }

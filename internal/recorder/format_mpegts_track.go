@@ -1,11 +1,11 @@
 package recorder
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
 	tscodecs "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts/codecs"
+	"github.com/bluenviron/mediamtx/internal/logger"
 )
 
 type formatMPEGTSTrack struct {
@@ -36,14 +36,31 @@ func (t *formatMPEGTSTrack) write(
 		t.f.hasVideo = true
 	}
 
+	// Get monotonic PTS in nanoseconds based on the frame ingest time
+	ptsNs, isGap := t.f.ri.monoClock.Stamp(ntp)
+	dts = ptsNs
+
 	if !t.startInitialized {
 		t.startDTS = dts
 		t.startNTP = ntp
 		t.startInitialized = true
-	} else {
-		drift := ntp.Sub(t.startNTP) - (dts - t.startDTS)
-		if drift < -ntpDriftTolerance || drift > ntpDriftTolerance {
-			return fmt.Errorf("detected drift between recording duration and absolute time, resetting")
+	}
+
+	// Index keyframes
+	if (!t.f.hasVideo || isVideo) && randomAccess {
+		segmentName := ""
+		if t.f.currentSegment != nil {
+			segmentName = t.f.currentSegment.path // needs format_mpegts_segment check if it has path
+		}
+
+		err := t.f.ri.keyframeIndex.Append(KeyframeIndexEntry{
+			WallTime:   ntp,
+			Segment:    segmentName,
+			MonoPTS:    int64(ptsNs),
+			IsGapStart: isGap,
+		})
+		if err != nil {
+			t.f.ri.Log(logger.Warn, "failed to write keyframe index: %v", err)
 		}
 	}
 
