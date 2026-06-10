@@ -57,7 +57,7 @@ func (ri *recorderInstance) initialize() {
 	ri.terminate = make(chan struct{})
 	ri.done = make(chan struct{})
 
-	ri.keyframeIndex.Initialize(ri.pathFormat)
+	ri.keyframeIndex.Initialize(ri.pathFormat, ri.streamID)
 	ri.monoClock.Initialize(2 * time.Second)
 	ri.monoClock.OnGap = func(wallStart, wallEnd time.Time, monoPTS time.Duration) {
 		ri.Log(logger.Info, "gap detected: %s to %s (duration: %s)", wallStart, wallEnd, wallEnd.Sub(wallStart))

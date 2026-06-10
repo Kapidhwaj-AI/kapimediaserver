@@ -19,7 +19,11 @@ type KeyframeIndexEntry struct {
 	IsGapStart bool      `json:"is_gap_start"`
 }
 
-// FindSegmentsViaIndex reads index.jsonl to find the exact sequence of segments and the MonoPTS start offset.
+// FindSegmentsViaIndex reads index-*.jsonl files to find the exact sequence of segments and the MonoPTS start offset.
+// 
+// Note: This function relies on segment file paths stored in the index. If segments are moved, deleted, or
+// if the directory structure changes, seeking will fail with "index entry missing segment path" or
+// "no segments found" errors. To maintain seekable recordings, keep the segment files in their original location.
 func FindSegmentsViaIndex(
 	pathConf *conf.Path,
 	pathName string,
@@ -33,18 +37,18 @@ func FindSegmentsViaIndex(
 	recordPath, _ = filepath.Abs(recordPath)
 	dir := filepath.Dir(recordPath)
 
-	indexPath := filepath.Join(dir, "index.jsonl")
-	f, err := os.Open(indexPath)
+	// Find all index-*.jsonl files for this stream
+	indexPattern := filepath.Join(dir, "index-*.jsonl")
+	indexFiles, err := filepath.Glob(indexPattern)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, 0, ErrNoSegmentsFound
-		}
 		return nil, 0, err
 	}
-	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	
+	if len(indexFiles) == 0 {
+		// No index files found, fallback to legacy segment discovery
+		return nil, 0, ErrNoSegmentsFound
+	}
+
 	// We'll collect unique segments
 	type segInfo struct {
 		Path  string
@@ -56,36 +60,47 @@ func FindSegmentsViaIndex(
 	var bestEntry *KeyframeIndexEntry
 	var lastEntry *KeyframeIndexEntry
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		
-		var entry KeyframeIndexEntry
-		if err := json.Unmarshal(line, &entry); err != nil {
-			continue
+	// Read all index files in order
+	for _, indexPath := range indexFiles {
+		f, err := os.Open(indexPath)
+		if err != nil {
+			continue // Skip files that can't be opened
 		}
 
-		if entry.Segment != "" && entry.Segment != lastSegPath {
-			allSegments = append(allSegments, segInfo{
-				Path:  entry.Segment,
-				Start: entry.WallTime, // We use the first keyframe's wall time as the segment start
-			})
-			lastSegPath = entry.Segment
-		}
+		scanner := bufio.NewScanner(f)
 
-		if start != nil {
-			if entry.WallTime.After(*start) {
-				if bestEntry == nil {
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if len(line) == 0 {
+				continue
+			}
+			
+			var entry KeyframeIndexEntry
+			if err := json.Unmarshal(line, &entry); err != nil {
+				continue
+			}
+
+			if entry.Segment != "" && entry.Segment != lastSegPath {
+				allSegments = append(allSegments, segInfo{
+					Path:  entry.Segment,
+					Start: entry.WallTime, // We use the first keyframe's wall time as the segment start
+				})
+				lastSegPath = entry.Segment
+			}
+
+			if start != nil {
+				if entry.WallTime.After(*start) {
+					if bestEntry == nil {
+						e := entry
+						bestEntry = &e
+					}
+				} else {
 					e := entry
-					bestEntry = &e
+					lastEntry = &e
 				}
-			} else {
-				e := entry
-				lastEntry = &e
 			}
 		}
+		f.Close()
 	}
 
 	if start != nil {

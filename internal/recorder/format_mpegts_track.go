@@ -5,7 +5,6 @@ import (
 
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
 	tscodecs "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts/codecs"
-	"github.com/bluenviron/mediamtx/internal/logger"
 )
 
 type formatMPEGTSTrack struct {
@@ -37,7 +36,7 @@ func (t *formatMPEGTSTrack) write(
 	}
 
 	// Get monotonic PTS in nanoseconds based on the frame ingest time
-	ptsNs, isGap := t.f.ri.monoClock.Stamp(ntp)
+	ptsNs, _ := t.f.ri.monoClock.Stamp(ntp)
 	dts = ptsNs
 
 	if !t.startInitialized {
@@ -46,23 +45,23 @@ func (t *formatMPEGTSTrack) write(
 		t.startInitialized = true
 	}
 
-	// Index keyframes
-	if (!t.f.hasVideo || isVideo) && randomAccess {
-		segmentName := ""
-		if t.f.currentSegment != nil {
-			segmentName = t.f.currentSegment.path // needs format_mpegts_segment check if it has path
-		}
-
-		err := t.f.ri.keyframeIndex.Append(KeyframeIndexEntry{
-			WallTime:   ntp,
-			Segment:    segmentName,
-			MonoPTS:    int64(ptsNs),
-			IsGapStart: isGap,
-		})
-		if err != nil {
-			t.f.ri.Log(logger.Warn, "failed to write keyframe index: %v", err)
-		}
-	}
+	// MPEG-TS keyframe indexing disabled: playback doesn't support MPEG-TS format yet.
+	// Once MPEG-TS playback is implemented, re-enable indexing here.
+	// if (!t.f.hasVideo || isVideo) && randomAccess {
+	// 	segmentName := ""
+	// 	if t.f.currentSegment != nil {
+	// 		segmentName = t.f.currentSegment.path
+	// 	}
+	// 	err := t.f.ri.keyframeIndex.Append(KeyframeIndexEntry{
+	// 		WallTime:   ntp,
+	// 		Segment:    segmentName,
+	// 		MonoPTS:    int64(ptsNs),
+	// 		IsGapStart: isGap,
+	// 	})
+	// 	if err != nil {
+	// 		t.f.ri.Log(logger.Warn, "failed to write keyframe index: %v", err)
+	// 	}
+	// }
 
 	switch {
 	case t.f.currentSegment == nil:

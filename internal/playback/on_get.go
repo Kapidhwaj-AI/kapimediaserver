@@ -81,14 +81,18 @@ func seekAndMux(
 		var dts time.Duration
 		var startOffset time.Duration
 		if monoPTS != 0 && firstMtxi != nil {
-			// Using index.jsonl offset
-			// MonoPTS is absolute ns. firstMtxi.DTS is Segment start ns.
-			// The duration offset to seek into the segment is MonoPTS - firstMtxi.DTS
+			// Precise seeking via index.jsonl: keyframe positions recorded during encoding.
+			// MonoPTS is the absolute monotonic PTS (ns) of the keyframe closest to the requested start time.
+			// firstMtxi.DTS is the monotonic PTS (ns) of the first frame in this segment.
+			// dts is the offset within the segment to start muxing from.
+			// This accounts for gaps detected during recording (silence, network drops, etc).
 			dts = time.Duration(monoPTS - firstMtxi.DTS)
-			// startOffset is negative for compatibility with subsequent segments logic
+			// startOffset is used for subsequent segments; negative offset for time calculations
 			startOffset = time.Duration(firstMtxi.DTS - monoPTS)
 		} else {
-			// Legacy seek via filename approximation
+			// Legacy fallback: no index available.
+			// Seek is approximate based on segment filename/wall time.
+			// This method does NOT account for gaps, so seeking to times after a gap may be inaccurate.
 			startOffset = segments[0].Start.Sub(start) // this is negative
 			dts = startOffset
 		}
