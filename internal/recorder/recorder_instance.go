@@ -1,7 +1,6 @@
 package recorder
 
 import (
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -58,10 +57,15 @@ func (ri *recorderInstance) initialize() {
 	ri.terminate = make(chan struct{})
 	ri.done = make(chan struct{})
 
-	// Initialize keyframe index in the stream's recording directory (pathFormat2 has %path replaced)
-	// Use stream name (pathName) instead of UUID for readable index filenames
-	indexDir := filepath.Dir(ri.pathFormat2)
-	ri.keyframeIndex.Initialize(indexDir, ri.pathName)
+	// Initialize keyframe index in the static root of the recording directory.
+	// pathFormat2 still contains date/time tokens (%Y, %m, etc.) so we MUST use
+	// CommonPath() — which stops at the first token — to get the real directory.
+	// This is the same logic used by FindSegmentsViaIndex in index_search.go,
+	// so writer and reader always agree on where the index file lives.
+	indexDir := recordstore.CommonPath(ri.pathFormat2)
+	if err := ri.keyframeIndex.Initialize(indexDir, ri.pathName); err != nil {
+		ri.Log(logger.Warn, "failed to initialize keyframe index: %v", err)
+	}
 	ri.monoClock.Initialize(2 * time.Second)
 	ri.monoClock.OnGap = func(wallStart, wallEnd time.Time, monoPTS time.Duration) {
 		ri.Log(logger.Info, "gap detected: %s to %s (duration: %s)", wallStart, wallEnd, wallEnd.Sub(wallStart))
