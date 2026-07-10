@@ -19,7 +19,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-
 type writerWrapper struct {
 	ctx     *gin.Context
 	written bool
@@ -152,19 +151,22 @@ func (s *Server) onGet(ctx *gin.Context) {
 		return
 	}
 
-	ww := &writerWrapper{ctx: ctx}
-	var m muxer
-
 	format := ctx.Query("format")
 	switch format {
-	case "", "fmp4":
-		m = &muxerFMP4{w: ww}
-
-	case "mp4":
-		m = &muxerMP4{w: ww}
-
+	case "", "fmp4", "mp4":
+		// valid
 	default:
 		s.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid format: %s", format))
+		return
+	}
+
+	// Validate and route the delivery parameter.
+	delivery := ctx.Query("delivery")
+	switch delivery {
+	case "", "seekable":
+		// valid
+	default:
+		s.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid delivery: %q (valid values: \"\", \"seekable\")", delivery))
 		return
 	}
 
@@ -185,17 +187,37 @@ func (s *Server) onGet(ctx *gin.Context) {
 		return
 	}
 
+	// -----------------------------------------------------------------------
+	// delivery=seekable: generate a complete cached MP4 and serve with ranges.
+	// -----------------------------------------------------------------------
+	if delivery == "seekable" {
+		if s.seekableCache == nil {
+			s.writeError(ctx, http.StatusBadRequest,
+				fmt.Errorf("seekable delivery is not configured (playbackSeekableCacheDir is empty)"))
+			return
+		}
+		if duration <= 0 {
+			s.writeError(ctx, http.StatusBadRequest, fmt.Errorf("duration must be greater than zero"))
+			return
+		}
 
-	// ?transcode=h264: pipe fMP4 through ffmpeg → H.264 MP4 on the fly
+		transcode := ctx.Query("transcode")
+		if transcode != "" && transcode != "h264" {
+			s.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid transcode value: %q", transcode))
+			return
+		}
+
+		s.onGetSeekable(ctx, pathName, start, duration, format, transcode, pathConf, segments)
+		return
+	}
+
+	// -----------------------------------------------------------------------
+	// ?transcode=h264: pipe fMP4 through ffmpeg → H.264 MP4 streamed to client.
+	// -----------------------------------------------------------------------
 	if ctx.Query("transcode") == "h264" {
-		// Create a pipe: the muxer writes fMP4 to pipeW; ffmpeg reads from pipeR.
 		pipeR, pipeW := io.Pipe()
 
-		// Point the muxer at the write end of the pipe.
-		// We use a plain writerWrapper that targets the pipe instead of the
-		// ResponseWriter so that headers are set separately below.
-		pipeWW := &writerWrapper{ctx: ctx}
-		pipeWW.written = true // suppress writerWrapper's header injection; we set them manually
+		var m muxer
 		switch format {
 		case "", "fmp4":
 			m = &muxerFMP4{w: pipeW}
@@ -203,65 +225,69 @@ func (s *Server) onGet(ctx *gin.Context) {
 			m = &muxerMP4{w: pipeW}
 		}
 
-		// Build the ffmpeg command.
-		// stdin  → fMP4 stream from the muxer
-		// stdout → H.264 MP4 streamed directly to the client
-		//
-		// Hardware path (Rockchip RK3588):
-		//   The container's own ffmpeg is typically a stock build without rkmpp.
-		//   The host ffmpeg (/usr/bin/ffmpeg, compiled with --enable-rkmpp) is reached
-		//   via /usr/local/bin/mtx-host.sh — a host-namespace wrapper that is bind-mounted
-		//   from the host into the container at /usr/local/bin.
-		//   If mtx-host.sh is not found we fall back to the container's ffmpeg (software).
 		const hostWrapper = "/usr/local/bin/mtx-host.sh"
 		const hostFFmpeg = "/usr/bin/ffmpeg"
-		ffmpegArgs := []string{
-			"-hide_banner", "-loglevel", "warning", // suppress banner; log only warnings+
-			"-c:v", "hevc_rkmpp", // hardware H.265 decoder (must precede -i)
-			"-i", "pipe:0", // read fMP4 from stdin
-			"-map", "0:v:0", // select first video stream
-			"-map", "0:a:0?", // select first audio stream (? = optional, handles video-only)
-			"-c:v", "h264_rkmpp", // hardware H.264 encoder
-			"-b:v", "2500k", "-maxrate", "2500k", "-bufsize", "5000k", // CBR for smooth HTTP streaming
-			"-g", "50", // keyframe every 50 frames (~2 s at 25 fps) — aids seeking
-			"-c:a", "copy", // stream-copy audio (already AAC in recorded fMP4, zero CPU)
-			"-movflags", "frag_keyframe+empty_moov", // fragmented MP4 required for pipe/HTTP output
+
+		// Detect source codec so we only apply the HEVC decoder when needed.
+		sourceIsHEVC := codecDetectHEVC(segments)
+
+		// Build hardware and software argument slices explicitly.
+		// The output is fragmented MP4 piped to the client (streaming, not seekable).
+		streamOutput := []string{
+			"-movflags", "frag_keyframe+empty_moov",
 			"-f", "mp4",
-			"pipe:1", // write to stdout → client
+			"pipe:1",
 		}
+
+		banner := []string{"-hide_banner", "-loglevel", "warning"}
+		input := []string{"-i", "pipe:0"}
+		streamSel := []string{"-map", "0:v:0", "-map", "0:a:0?"}
+		audioArgs := []string{"-c:a", "copy"}
+
+		var hwArgs []string
+		if sourceIsHEVC {
+			hwArgs = append(banner, "-c:v", "hevc_rkmpp")
+		} else {
+			hwArgs = append([]string{}, banner...)
+		}
+		hwArgs = append(hwArgs, input...)
+		hwArgs = append(hwArgs, streamSel...)
+		hwArgs = append(hwArgs, "-c:v", "h264_rkmpp",
+			"-b:v", "2500k", "-maxrate", "2500k", "-bufsize", "5000k",
+			"-g", "50")
+		hwArgs = append(hwArgs, audioArgs...)
+		hwArgs = append(hwArgs, streamOutput...)
+
+		var swArgs []string
+		if sourceIsHEVC {
+			swArgs = append(banner, "-c:v", "hevc")
+		} else {
+			swArgs = append([]string{}, banner...)
+		}
+		swArgs = append(swArgs, input...)
+		swArgs = append(swArgs, streamSel...)
+		swArgs = append(swArgs, "-c:v", "libx264",
+			"-preset", "veryfast", "-crf", "23", "-g", "50")
+		swArgs = append(swArgs, audioArgs...)
+		swArgs = append(swArgs, streamOutput...)
 
 		var cmd *exec.Cmd
 		if _, statErr := os.Stat(hostWrapper); statErr == nil {
-			// Host-namespace wrapper found: use host's rkmpp-enabled ffmpeg.
 			s.Log(logger.Info, "transcode: using hardware path via %s", hostWrapper)
 			cmd = exec.CommandContext(ctx.Request.Context(), hostWrapper,
-				append([]string{hostFFmpeg}, ffmpegArgs...)...)
+				append([]string{hostFFmpeg}, hwArgs...)...)
 		} else {
-			// Fallback: container's own ffmpeg (software codecs only).
 			s.Log(logger.Info, "transcode: %s not found, falling back to software ffmpeg", hostWrapper)
-			ffmpegArgs[5] = "hevc" // replace hevc_rkmpp decoder with software hevc
-			// replace h264_rkmpp encoder with libx264
-			for i, a := range ffmpegArgs {
-				if a == "h264_rkmpp" {
-					ffmpegArgs[i] = "libx264"
-					// insert -preset veryfast -crf 23 after libx264
-					tail := append([]string{"-preset", "veryfast", "-crf", "23"}, ffmpegArgs[i+1:]...)
-					ffmpegArgs = append(ffmpegArgs[:i+1], tail...)
-					break
-				}
-			}
-			cmd = exec.CommandContext(ctx.Request.Context(), "ffmpeg", ffmpegArgs...)
+			cmd = exec.CommandContext(ctx.Request.Context(), "ffmpeg", swArgs...)
 		}
 
 		cmd.Stdin = pipeR
 		cmd.Stdout = ctx.Writer
-		// Route ffmpeg stderr to the mediamtx log so errors are visible.
 		cmd.Stderr = &logWriter{s: s}
 
 		// Set response headers before the first byte is written.
 		ctx.Header("Accept-Ranges", "none")
 		ctx.Header("Content-Type", "video/mp4")
-
 
 		if startErr := cmd.Start(); startErr != nil {
 			pipeR.CloseWithError(startErr)
@@ -286,6 +312,8 @@ func (s *Server) onGet(ctx *gin.Context) {
 		// Drain the mux result so the goroutine doesn't leak.
 		muxResult := <-muxErr
 
+		pipeR.Close()
+
 		// If the client disconnected, both errors are expected — ignore them.
 		var neterr *net.OpError
 		if errors.As(muxResult, &neterr) {
@@ -300,9 +328,19 @@ func (s *Server) onGet(ctx *gin.Context) {
 		}
 		return
 	}
+
 	// ---------------------------------------------------------------------------
 	// Default path: write fMP4/MP4 directly to the ResponseWriter (unchanged)
 	// ---------------------------------------------------------------------------
+
+	ww := &writerWrapper{ctx: ctx}
+	var m muxer
+	switch format {
+	case "", "fmp4":
+		m = &muxerFMP4{w: ww}
+	case "mp4":
+		m = &muxerMP4{w: ww}
+	}
 
 	err = seekAndMux(pathConf.RecordFormat, segments, start, duration, m)
 	if err != nil {

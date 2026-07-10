@@ -404,18 +404,21 @@ func (p *Core) createResources(initial bool) error {
 	if p.conf.Playback &&
 		p.playbackServer == nil {
 		i := &playback.Server{
-			Address:        p.conf.PlaybackAddress,
-			DumpPackets:    p.conf.DumpPackets,
-			Encryption:     p.conf.PlaybackEncryption,
-			ServerKey:      p.conf.PlaybackServerKey,
-			ServerCert:     p.conf.PlaybackServerCert,
-			AllowOrigins:   p.conf.PlaybackAllowOrigins,
-			TrustedProxies: p.conf.PlaybackTrustedProxies,
-			ReadTimeout:    p.conf.ReadTimeout,
-			WriteTimeout:   p.conf.WriteTimeout,
-			PathConfs:      p.conf.Paths,
-			AuthManager:    p.authManager,
-			Parent:         p,
+			Address:              p.conf.PlaybackAddress,
+			DumpPackets:          p.conf.DumpPackets,
+			Encryption:           p.conf.PlaybackEncryption,
+			ServerKey:            p.conf.PlaybackServerKey,
+			ServerCert:           p.conf.PlaybackServerCert,
+			AllowOrigins:         p.conf.PlaybackAllowOrigins,
+			TrustedProxies:       p.conf.PlaybackTrustedProxies,
+			ReadTimeout:          p.conf.ReadTimeout,
+			WriteTimeout:         p.conf.WriteTimeout,
+			PathConfs:            p.conf.Paths,
+			AuthManager:          p.authManager,
+			Parent:               p,
+			SeekableCacheDir:     p.conf.PlaybackSeekableCacheDir,
+			SeekableCacheTTL:     time.Duration(p.conf.PlaybackSeekableCacheTTL),
+			SeekableCacheMaxSize: uint64(p.conf.PlaybackSeekableCacheMaxSize),
 		}
 		err = i.Initialize()
 		if err != nil {
@@ -786,6 +789,9 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.PlaybackServerCert != p.conf.PlaybackServerCert ||
 		!slices.Equal(newConf.PlaybackAllowOrigins, p.conf.PlaybackAllowOrigins) ||
 		!reflect.DeepEqual(newConf.PlaybackTrustedProxies, p.conf.PlaybackTrustedProxies) ||
+		newConf.PlaybackSeekableCacheDir != p.conf.PlaybackSeekableCacheDir ||
+		newConf.PlaybackSeekableCacheTTL != p.conf.PlaybackSeekableCacheTTL ||
+		newConf.PlaybackSeekableCacheMaxSize != p.conf.PlaybackSeekableCacheMaxSize ||
 		newConf.ReadTimeout != p.conf.ReadTimeout ||
 		newConf.WriteTimeout != p.conf.WriteTimeout ||
 		newConf.DumpPackets != p.conf.DumpPackets ||

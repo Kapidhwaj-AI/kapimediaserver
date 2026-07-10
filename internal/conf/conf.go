@@ -301,14 +301,17 @@ type Conf struct {
 	PPROFTrustedProxies IPNetworks `json:"pprofTrustedProxies"`
 
 	// Playback
-	Playback               bool       `json:"playback"`
-	PlaybackAddress        string     `json:"playbackAddress"`
-	PlaybackEncryption     bool       `json:"playbackEncryption"`
-	PlaybackServerKey      string     `json:"playbackServerKey"`
-	PlaybackServerCert     string     `json:"playbackServerCert"`
-	PlaybackAllowOrigin    *string    `json:"playbackAllowOrigin,omitempty"` // deprecated
-	PlaybackAllowOrigins   []string   `json:"playbackAllowOrigins"`
-	PlaybackTrustedProxies IPNetworks `json:"playbackTrustedProxies"`
+	Playback                    bool       `json:"playback"`
+	PlaybackAddress             string     `json:"playbackAddress"`
+	PlaybackEncryption          bool       `json:"playbackEncryption"`
+	PlaybackServerKey           string     `json:"playbackServerKey"`
+	PlaybackServerCert          string     `json:"playbackServerCert"`
+	PlaybackAllowOrigin         *string    `json:"playbackAllowOrigin,omitempty"` // deprecated
+	PlaybackAllowOrigins        []string   `json:"playbackAllowOrigins"`
+	PlaybackTrustedProxies      IPNetworks `json:"playbackTrustedProxies"`
+	PlaybackSeekableCacheDir    string     `json:"playbackSeekableCacheDir"`
+	PlaybackSeekableCacheTTL    Duration   `json:"playbackSeekableCacheTTL"`
+	PlaybackSeekableCacheMaxSize StringSize `json:"playbackSeekableCacheMaxSize"`
 
 	// RTSP server
 	RTSP                  bool             `json:"rtsp"`
@@ -460,6 +463,8 @@ func (conf *Conf) setDefaults() {
 	conf.PlaybackServerKey = "server.key"
 	conf.PlaybackServerCert = "server.crt"
 	conf.PlaybackAllowOrigins = []string{"*"}
+	conf.PlaybackSeekableCacheTTL = Duration(15 * time.Minute)
+	conf.PlaybackSeekableCacheMaxSize = StringSize(2 * 1024 * 1024 * 1024)
 
 	// RTSP server
 	conf.RTSP = true
@@ -782,6 +787,14 @@ func (conf *Conf) Validate(l logger.Writer) error {
 	if conf.Playback {
 		if conf.PlaybackAddress == "" {
 			return fmt.Errorf("'playbackAddress' must be set when playback is enabled")
+		}
+		if conf.PlaybackSeekableCacheDir != "" {
+			if conf.PlaybackSeekableCacheTTL <= 0 {
+				return fmt.Errorf("'playbackSeekableCacheTTL' must be positive when playbackSeekableCacheDir is set")
+			}
+			if conf.PlaybackSeekableCacheMaxSize <= 0 {
+				return fmt.Errorf("'playbackSeekableCacheMaxSize' must be positive when playbackSeekableCacheDir is set")
+			}
 		}
 	}
 

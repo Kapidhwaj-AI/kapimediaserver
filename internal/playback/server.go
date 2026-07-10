@@ -2,6 +2,7 @@
 package playback
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"sync"
@@ -34,12 +35,32 @@ type Server struct {
 	AuthManager    serverAuthManager
 	Parent         logger.Writer
 
-	httpServer *httpp.Server
-	mutex      sync.RWMutex
+	// Seekable cache configuration (optional).
+	// When SeekableCacheDir is empty, delivery=seekable requests return HTTP 400.
+	SeekableCacheDir     string
+	SeekableCacheTTL     time.Duration
+	SeekableCacheMaxSize uint64
+
+	httpServer   *httpp.Server
+	mutex        sync.RWMutex
+	seekableCache *SeekableCache
 }
 
 // Initialize initializes Server.
 func (s *Server) Initialize() error {
+	// Initialize seekable cache if configured.
+	if s.SeekableCacheDir != "" {
+		s.seekableCache = &SeekableCache{
+			Dir:     s.SeekableCacheDir,
+			TTL:     s.SeekableCacheTTL,
+			MaxSize: s.SeekableCacheMaxSize,
+			Parent:  s,
+		}
+		if err := s.seekableCache.Initialize(); err != nil {
+			return fmt.Errorf("seekable cache: %w", err)
+		}
+	}
+
 	router := gin.New()
 	router.SetTrustedProxies(s.TrustedProxies.ToTrustedProxies()) //nolint:errcheck
 
@@ -47,6 +68,9 @@ func (s *Server) Initialize() error {
 
 	router.GET("/list", s.onList)
 	router.GET("/get", s.onGet)
+	// Register HEAD for /get so that http.ServeContent (used by delivery=seekable)
+	// can respond to HEAD requests with correct headers and no body.
+	router.HEAD("/get", s.onGet)
 
 	s.httpServer = &httpp.Server{
 		Address:           s.Address,
@@ -63,6 +87,9 @@ func (s *Server) Initialize() error {
 	}
 	err := s.httpServer.Initialize()
 	if err != nil {
+		if s.seekableCache != nil {
+			s.seekableCache.Close()
+		}
 		return err
 	}
 
@@ -75,6 +102,9 @@ func (s *Server) Initialize() error {
 func (s *Server) Close() {
 	s.Log(logger.Info, "listener is closing")
 	s.httpServer.Close()
+	if s.seekableCache != nil {
+		s.seekableCache.Close()
+	}
 }
 
 // Log implements logger.Writer.
@@ -108,7 +138,7 @@ func (s *Server) safeFindPathConf(name string) (*conf.Path, error) {
 func (s *Server) middlewarePreflightRequests(ctx *gin.Context) {
 	if ctx.Request.Method == http.MethodOptions &&
 		ctx.Request.Header.Get("Access-Control-Request-Method") != "" {
-		ctx.Header("Access-Control-Allow-Methods", "OPTIONS, GET")
+		ctx.Header("Access-Control-Allow-Methods", "OPTIONS, GET, HEAD")
 		ctx.Header("Access-Control-Allow-Headers", "Authorization")
 		ctx.AbortWithStatus(http.StatusNoContent)
 		return
